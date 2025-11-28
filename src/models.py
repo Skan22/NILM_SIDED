@@ -108,81 +108,11 @@ class ATCNModel(nn.Module):
         x = self.attention(x)  # Apply attention
         return self.fc(x)
 
-# GRU Model
-class GRUModel(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=3, output_size=5):
-        super(GRUModel, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        
-        self.gru = nn.GRU(input_size=input_size,
-                         hidden_size=hidden_size,
-                         num_layers=num_layers,
-                         batch_first=True,
-                         dropout=0.2)
-        
-        self.fc = nn.Linear(hidden_size, output_size)
-        
-    def forward(self, x):
-        gru_out, _h_n = self.gru(x)
-        out = self.fc(gru_out[:, -1, :])
-        return out
 
-# CNN-LSTM Model
-class CNN_LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=2, output_size=5):
-        super(CNN_LSTM, self).__init__()
-        
-        # CNN layers
-        self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool1d(kernel_size=2)
-        self.relu = nn.ReLU()
-        
-        # LSTM layer
-        self.lstm = nn.LSTM(input_size=128,
-                           hidden_size=hidden_size,
-                           num_layers=num_layers,
-                           batch_first=True,
-                           dropout=0.2)
-        
-        self.fc = nn.Linear(hidden_size, output_size)
-        
-    def forward(self, x):
-        # x shape: (batch, seq_len, input_size)
-        x = x.permute(0, 2, 1)  # (batch, input_size, seq_len)
-        
-        x = self.relu(self.conv1(x))
-        x = self.pool(x)
-        x = self.relu(self.conv2(x))
-        x = self.pool(x)
-        
-        x = x.permute(0, 2, 1)  # (batch, seq_len, features)
-        
-        lstm_out, (_h_n, _c_n) = self.lstm(x)
-        out = self.fc(lstm_out[:, -1, :])
-        return out
 
-# Bidirectional LSTM Model
-class BiLSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size=128, num_layers=3, output_size=5):
-        super(BiLSTMModel, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        
-        self.lstm = nn.LSTM(input_size=input_size,
-                           hidden_size=hidden_size,
-                           num_layers=num_layers,
-                           batch_first=True,
-                           bidirectional=True,
-                           dropout=0.2)
-        
-        self.fc = nn.Linear(hidden_size * 2, output_size)  # *2 for bidirectional
-        
-    def forward(self, x):
-        lstm_out, (_h_n, _c_n) = self.lstm(x)
-        out = self.fc(lstm_out[:, -1, :])
-        return out
+
+
+
 
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size=128, num_layers=3, output_size=5):

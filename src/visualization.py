@@ -21,7 +21,7 @@ def evaluate_saved_model_robust(model, model_path, test_loader, device, applianc
     
     print(f"Evaluating {model_path.name}...")
     
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_X, batch_y in tqdm(test_loader, desc='Evaluating', leave=False):
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)

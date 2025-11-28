@@ -40,6 +40,65 @@ def create_sequences(X, y, seq_length, stride=1, target_pos='mid'):
         y_seq.append(y[t_idx])
     return np.array(X_seq), np.array(y_seq)
 
+def preprocess_single_appliance(train_df, test_df, appliance_name):
+    """
+    Preprocess data for single-appliance NILM using RobustScaler with missing value handling.
+    
+    Args:
+        train_df: Training dataframe
+        test_df: Testing dataframe
+        appliance_name: Name of the target appliance
+    
+    Returns:
+        Scaled data and scalers for input (aggregate) and output (single appliance)
+    """
+    # Extract aggregate power (input) and single appliance power (output)
+    X_train_raw = train_df['Aggregate'].values.reshape(-1, 1)
+    y_train_raw = train_df[appliance_name].values.reshape(-1, 1)
+    
+    X_test_raw = test_df['Aggregate'].values.reshape(-1, 1)
+    y_test_raw = test_df[appliance_name].values.reshape(-1, 1)
+    
+    # Check for and handle missing/inf values
+    for name, arr in [("X_train", X_train_raw), ("y_train", y_train_raw), 
+                       ("X_test", X_test_raw), ("y_test", y_test_raw)]:
+        nan_count = np.isnan(arr).sum()
+        inf_count = np.isinf(arr).sum()
+        
+        if nan_count > 0 or inf_count > 0:
+            print(f"  ⚠️ {appliance_name} - {name}: {nan_count} NaN, {inf_count} Inf values")
+            # Replace inf with nan, then fill with 0
+            arr = np.where(np.isinf(arr), np.nan, arr)
+            arr = np.nan_to_num(arr, nan=0.0)
+            
+            # Update the original arrays
+            if name == "X_train": X_train_raw = arr
+            elif name == "y_train": y_train_raw = arr
+            elif name == "X_test": X_test_raw = arr
+            elif name == "y_test": y_test_raw = arr
+    
+    # Normalize using RobustScaler for X (Aggregate usually has variance)
+    # Use StandardScaler for y (Appliance) because sparse data often has IQR=0, causing RobustScaler to fail
+    from sklearn.preprocessing import StandardScaler
+    scaler_X = RobustScaler()
+    scaler_y = StandardScaler()
+    
+    print(f"  Raw Data Stats for {appliance_name}:")
+    print(f"    X_train_raw: min={X_train_raw.min():.2f}, max={X_train_raw.max():.2f}, mean={X_train_raw.mean():.2f}, std={X_train_raw.std():.2f}")
+    print(f"    y_train_raw: min={y_train_raw.min():.2f}, max={y_train_raw.max():.2f}, mean={y_train_raw.mean():.2f}, std={y_train_raw.std():.2f}")
+    
+    X_train_scaled = scaler_X.fit_transform(X_train_raw)
+    y_train_scaled = scaler_y.fit_transform(y_train_raw)
+    
+    X_test_scaled = scaler_X.transform(X_test_raw)
+    y_test_scaled = scaler_y.transform(y_test_raw)
+    
+    print(f"  Data Stats for {appliance_name}:")
+    print(f"    X_train: min={X_train_scaled.min():.2f}, max={X_train_scaled.max():.2f}, mean={X_train_scaled.mean():.2f}, std={X_train_scaled.std():.2f}")
+    print(f"    y_train: min={y_train_scaled.min():.2f}, max={y_train_scaled.max():.2f}, mean={y_train_scaled.mean():.2f}, std={y_train_scaled.std():.2f}")
+    
+    return X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled, scaler_X, scaler_y
+
 def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], source_locations=['LA', 'Offenbach'], resample_rule='5min'):
     """
     Load data split by location for Domain Adaptation tasks with robust missing value handling.
@@ -71,7 +130,7 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
                 if missing_before > 0:
                     print(f"  ⚠️ Found {missing_before} missing values in {facility}_{loc}")
                     # Forward fill then backward fill to handle missing values
-                    df[appliance_columns] = df[appliance_columns].fillna(method='ffill').fillna(method='bfill')
+                    df[appliance_columns] = df[appliance_columns].ffill().bfill()
                     # If still NaN (entire column is NaN), fill with 0
                     df[appliance_columns] = df[appliance_columns].fillna(0)
                     print(f"  ✅ Missing values handled via forward/backward fill")
@@ -110,7 +169,7 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
                 missing_before = df[appliance_columns].isnull().sum().sum()
                 if missing_before > 0:
                     print(f"  ⚠️ Found {missing_before} missing values in {facility}_{loc}")
-                    df[appliance_columns] = df[appliance_columns].fillna(method='ffill').fillna(method='bfill')
+                    df[appliance_columns] = df[appliance_columns].ffill().bfill()
                     df[appliance_columns] = df[appliance_columns].fillna(0)
                     print(f"  ✅ Missing values handled via forward/backward fill")
                 
@@ -169,29 +228,3 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
     
     return train_df, test_df
 
-def preprocess_data(train_df, test_df, appliance_columns=['EVSE', 'PV', 'CS', 'CHP', 'BA']):
-    """
-    Preprocess data using RobustScaler as per the paper.
-    """
-    # 1. Prepare Training Data (Source Domain)
-    X_train_raw = train_df['Aggregate'].values.reshape(-1, 1)
-    y_train_raw = train_df[appliance_columns].values
-
-    # 2. Prepare Testing Data (Target Domain)
-    X_test_raw = test_df['Aggregate'].values.reshape(-1, 1)
-    y_test_raw = test_df[appliance_columns].values
-
-    # 3. Normalize using RobustScaler
-    # Important: Fit scaler ONLY on training data to avoid data leakage
-    scaler_X = RobustScaler()
-    scaler_y = RobustScaler()
-
-    # Fit on Train, Transform Train
-    X_train_scaled = scaler_X.fit_transform(X_train_raw)
-    y_train_scaled = scaler_y.fit_transform(y_train_raw)
-
-    # Transform Test (using Train statistics)
-    X_test_scaled = scaler_X.transform(X_test_raw)
-    y_test_scaled = scaler_y.transform(y_test_raw)
-    
-    return X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled, scaler_X, scaler_y

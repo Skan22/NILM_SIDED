@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
-from src.dataset import load_data_by_location, create_sequences, NILMDataset
+from src.dataset import load_data_by_location, create_sequences, NILMDataset, preprocess_single_appliance
 from src.models import TCNModel, ATCNModel, LSTMModel
+from src.train import train_single_appliance_model, evaluate_single_appliance_model, calculate_single_appliance_metrics
 from torch.utils.data import DataLoader
 import numpy as np
-from sklearn.preprocessing import RobustScaler
 import json
 
 # Configuration matching the paper
@@ -18,7 +18,7 @@ CONFIG = {
     'train_stride': 5,        # 25 min stride for training
     'eval_stride': 1,         # Dense evaluation
     'batch_size': 64,
-    'learning_rate': 0.001,
+    'learning_rate': 0.0003,
     'num_epochs': 20,
     'warmup_epochs': 3,
     'min_lr': 1e-6,
@@ -33,108 +33,6 @@ CONFIG = {
 
 # Appliances to disaggregate (single-appliance NILM)
 APPLIANCES = ['EVSE', 'PV', 'CS', 'CHP', 'BA']
-
-
-def preprocess_single_appliance(train_df, test_df, appliance_name):
-    """
-    Preprocess data for single-appliance NILM using RobustScaler with missing value handling.
-    
-    Args:
-        train_df: Training dataframe
-        test_df: Testing dataframe
-        appliance_name: Name of the target appliance
-    
-    Returns:
-        Scaled data and scalers for input (aggregate) and output (single appliance)
-    """
-    # Extract aggregate power (input) and single appliance power (output)
-    X_train_raw = train_df['Aggregate'].values.reshape(-1, 1)
-    y_train_raw = train_df[appliance_name].values.reshape(-1, 1)
-    
-    X_test_raw = test_df['Aggregate'].values.reshape(-1, 1)
-    y_test_raw = test_df[appliance_name].values.reshape(-1, 1)
-    
-    # Check for and handle missing/inf values
-    for name, arr in [("X_train", X_train_raw), ("y_train", y_train_raw), 
-                       ("X_test", X_test_raw), ("y_test", y_test_raw)]:
-        nan_count = np.isnan(arr).sum()
-        inf_count = np.isinf(arr).sum()
-        
-        if nan_count > 0 or inf_count > 0:
-            print(f"  ⚠️ {appliance_name} - {name}: {nan_count} NaN, {inf_count} Inf values")
-            # Replace inf with nan, then fill with 0
-            arr = np.where(np.isinf(arr), np.nan, arr)
-            arr = np.nan_to_num(arr, nan=0.0)
-            
-            # Update the original arrays
-            if name == "X_train":
-                X_train_raw = arr
-            elif name == "y_train":
-                y_train_raw = arr
-            elif name == "X_test":
-                X_test_raw = arr
-            elif name == "y_test":
-                y_test_raw = arr
-    
-    # Normalize using RobustScaler (fit on training data only)
-    scaler_X = RobustScaler()
-    scaler_y = RobustScaler()
-    
-    X_train_scaled = scaler_X.fit_transform(X_train_raw)
-    y_train_scaled = scaler_y.fit_transform(y_train_raw)
-    
-    X_test_scaled = scaler_X.transform(X_test_raw)
-    
-    # Sanitize predictions
-    predictions = np.nan_to_num(predictions, nan=0.0, posinf=0.0, neginf=0.0)
-    predictions = np.clip(predictions, -8.0, 8.0)
-    
-    targets = np.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
-    targets = np.clip(targets, -8.0, 8.0)
-    
-    # Inverse transform to original scale
-    targets_real = scaler_y.inverse_transform(targets.astype(np.float64)).astype(np.float32)
-    predictions_real = scaler_y.inverse_transform(predictions.astype(np.float64)).astype(np.float32)
-    
-    # Apply physical constraints
-    load_appliances = ['EVSE', 'CS', 'BA']
-    generation_appliances = ['PV', 'CHP']
-    
-    if appliance_name in load_appliances:
-        predictions_real = np.maximum(predictions_real, 0)  # Loads are non-negative
-    elif appliance_name in generation_appliances:
-        predictions_real = np.minimum(predictions_real, 0)  # Generation is non-positive
-    
-    # Calculate metrics
-    mae_w = mean_absolute_error(targets_real, predictions_real)
-    mse_w = mean_squared_error(targets_real, predictions_real)
-    r2 = r2_score(targets_real, predictions_real)
-    
-    # Convert to MW for readability
-    mae_mw = mae_w / 1e6
-    mse_mw = mse_w / (1e6 ** 2)
-    
-    # Calculate NDE (Normalized Disaggregation Error)
-    numerator = np.sum(np.abs(targets_real - predictions_real))
-    denominator = np.sum(np.abs(targets_real))
-    nde = numerator / denominator if denominator > 0 else float('inf')
-    
-    metrics = {
-        'MAE_W': float(mae_w),
-        'MAE_MW': float(mae_mw),
-        'MSE_W': float(mse_w),
-        'MSE_MW2': float(mse_mw),
-        'R2': float(r2),
-        'NDE': float(nde)
-    }
-    
-    print(f"\n{appliance_name} Metrics:")
-    print(f"  MAE: {mae_w:.2f} W ({mae_mw:.6f} MW)")
-    print(f"  MSE: {mse_w:.2f} W² ({mse_mw:.6f} MW²)")
-    print(f"  R²:  {r2:.4f}")
-    print(f"  NDE: {nde:.4f}")
-    
-    return metrics, predictions_real, targets_real
 
 
 def main():
@@ -160,6 +58,13 @@ def main():
     
     # Model architectures to train
     model_configs = {
+        'LSTM': lambda: LSTMModel(
+            input_size=CONFIG['input_size'], 
+            hidden_size=CONFIG['lstm_hidden'], 
+            num_layers=CONFIG['lstm_layers'],
+            output_size=CONFIG['output_size']
+        ),
+
         'TCN': lambda: TCNModel(
             input_size=CONFIG['input_size'], 
             num_channels=CONFIG['tcn_layers'], 
@@ -170,12 +75,6 @@ def main():
             input_size=CONFIG['input_size'], 
             num_channels=CONFIG['tcn_layers'], 
             dropout=CONFIG['dropout'],
-            output_size=CONFIG['output_size']
-        ),
-        'LSTM': lambda: LSTMModel(
-            input_size=CONFIG['input_size'], 
-            hidden_size=CONFIG['lstm_hidden'], 
-            num_layers=CONFIG['lstm_layers'],
             output_size=CONFIG['output_size']
         )
     }
@@ -295,13 +194,8 @@ def main():
             
             # Evaluate the model
             print(f"\nEvaluating {model_name} on {appliance_name}...")
-            preds, targets, test_loss = evaluate_single_appliance_model(
-                model, test_loader, criterion, device
-            )
-            
-            # Calculate metrics
-            metrics, preds_real, targets_real = calculate_single_appliance_metrics(
-                targets, preds, appliance_name, scaler_y
+            metrics, preds_real, targets_real = evaluate_single_appliance_model(
+                model, test_loader, device, scaler_y, appliance_name
             )
             
             # Store results

@@ -77,7 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate AMDA augmented dataset for NILM.")
     parser.add_argument("--input", "-i", type=str, default="./SIDED", help="Path to original data directory")
     parser.add_argument("--output", "-o", type=str, default="./AMDA_SIDED", help="Path to output augmented data directory")
-    parser.add_argument("--alphas", "-a", type=float, nargs="+", default=[1.5,2.5, 4.0], help="List of alpha (s) values for augmentation")
+    parser.add_argument("--alphas", "-a", type=float, nargs="+", default=[2.5], help="List of alpha (s) values for augmentation")
     parser.add_argument("--no-original", action="store_true", help="Do not include original data in the output files")
     
     args = parser.parse_args()

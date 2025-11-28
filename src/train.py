@@ -6,6 +6,8 @@ import time
 import math
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from torch.amp.autocast_mode import autocast 
+from torch.amp.grad_scaler import GradScaler
 
 
 def train_single_appliance_model(model, train_loader, val_loader, criterion, optimizer, 
@@ -17,7 +19,7 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
     """
     model.to(device)
     use_amp = (device.type == 'cuda')
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = GradScaler(enabled=use_amp,device="cuda")
     
     best_val_loss = float('inf')
     patience_counter = 0
@@ -35,7 +37,7 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
             
             
             
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with autocast(enabled=use_amp,device_type="cuda"):
                 outputs = model(batch_X)
                 # Detect exploding outputs early
                 if not torch.isfinite(outputs).all():
@@ -66,7 +68,7 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
                 batch_X = batch_X.to(device, non_blocking=True)
                 batch_y = batch_y.to(device, non_blocking=True)
                 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with autocast(enabled=use_amp,device_type="cuda"):
                     outputs = model(batch_X)
                     if not torch.isfinite(outputs).all():
                         outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e6, neginf=-1e6)
@@ -127,7 +129,11 @@ def evaluate_single_appliance_model(model, test_loader, device, scaler_y, applia
     metrics = calculate_single_appliance_metrics(targets, predictions, appliance_name, scaler_y)
     metrics['parameters'] = count_parameters(model)
     
-    return metrics, predictions, targets
+    # Inverse transform for returning real values
+    predictions_real = scaler_y.inverse_transform(predictions.astype(np.float64)).astype(np.float32)
+    targets_real = scaler_y.inverse_transform(targets.astype(np.float64)).astype(np.float32)
+    
+    return metrics, predictions_real, targets_real
 
 
 def calculate_single_appliance_metrics(targets, predictions, appliance_name, scaler_y):
