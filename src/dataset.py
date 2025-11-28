@@ -16,7 +16,7 @@ class NILMDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-def create_sequences(X, y, seq_length, stride=1, target_pos='mid'):
+def create_sequences(X, y, seq_length, stride=1, target_pos='end'):
     """Create sequences for S2P models.
     - X: (N, input_dim)
     - y: (N, output_dim)

@@ -217,14 +217,16 @@ CONFIG = {
 }
 ```
 
-### Sequence-to-Point (S2P)
+### Sequence-to-End Prediction
 
 Input: Time series window of aggregate power  
-Output: Single point prediction at window midpoint
+Output: Single point prediction at the **end** of the window (causal prediction)
 
 ```
-X_t = {x_{t-144}, ..., x_t, ..., x_{t+144}}  → y_t
+X_t = {x_{t-287}, ..., x_t}  → y_t
 ```
+
+> **Note**: The models are causal (TCN uses Chomp1d, LSTM uses last state), ensuring no future leakage.
 
 ---
 
@@ -256,6 +258,7 @@ Results vary by appliance and model. Example metrics:
 Comprehensive documentation is available in the `docs/` directory:
 
 - **[METHODOLOGY.md](docs/METHODOLOGY.md)** - Single-appliance NILM approach
+- **[MODEL_USAGE.md](docs/MODEL_USAGE.md)** - Detailed input/output specs & usage guide 🆕
 - **[DATA_PIPELINE.md](docs/DATA_PIPELINE.md)** - Data loading and preprocessing
 - **[TRAINING.md](docs/TRAINING.md)** - Training procedure and hyperparameters
 - **[EVALUATION.md](docs/EVALUATION.md)** - Metrics and evaluation protocol
