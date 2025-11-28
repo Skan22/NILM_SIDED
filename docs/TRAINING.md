@@ -37,6 +37,24 @@ CONFIG = {
 }
 ```
 
+### Fair Comparison Configuration (`reproduce_paper_fair.py`)
+
+To ensure a scientifically valid comparison, we provide a configuration where all models are matched to **~1.05M parameters**:
+
+```python
+CONFIG_FAIR = {
+    # TCN (Unchanged Baseline)
+    'tcn_layers': [128] * 8,  # ~1.05M params
+    
+    # ATCN (Reduced)
+    'atcn_layers': [100] * 8, # ~1.05M params (reduced from 128)
+    
+    # LSTM (Increased)
+    'lstm_hidden': 356,       # ~1.05M params (increased from 128)
+    'lstm_layers': 5          # Increased from 3
+}
+```
+
 ---
 
 ## Model Architectures

@@ -223,42 +223,6 @@ Each model learns unique patterns:
 
 ### 5. Paper Compliance
 - Exactly matches paper methodology
-- Reproducible results
-- Valid comparison with paper benchmarks
-
----
-
-## Disadvantages
-
-### 1. More Models to Train
-- 15 models instead of 3
-- Longer total training time (~5-10 hours vs ~1-2 hours)
-
-### 2. More Storage
-- 15 model files (~250 MB) vs 3 files (~50 MB)
-
-### 3. Slower Inference
-- Need 5 forward passes (one per appliance)
-- vs 1 forward pass for multi-output
-
-**Trade-off**: Higher accuracy and paper compliance vs computational cost
-
----
-
-## Results Structure
-
-### Model Files
-
-```
-TCN_EVSE_best.pth     ← TCN specialized for EVSE
-TCN_PV_best.pth       ← TCN specialized for PV
-TCN_CS_best.pth       ← TCN specialized for CS
-TCN_CHP_best.pth      ← TCN specialized for CHP
-TCN_BA_best.pth       ← TCN specialized for BA
-
-ATCN_EVSE_best.pth    ← ATCN specialized for EVSE
-... (and so on)
-
 Total: 15 model files
 ```
 
