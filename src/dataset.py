@@ -1,0 +1,145 @@
+import pandas as pd
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+from pathlib import Path
+
+class NILMDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = X
+        self.y = y
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+def create_sequences(X, y, seq_length, stride=1, target_pos='mid'):
+    """Create sequences for S2P models.
+    - X: (N, input_dim)
+    - y: (N, output_dim)
+    - seq_length: window length (e.g., 288)
+    - stride: step between windows (e.g., 5 for 25 minutes)
+    - target_pos: 'mid' uses midpoint of the window; 'end' uses next step after window
+    Returns: X_seq (M, seq_len, input_dim), y_seq (M, output_dim)
+    """
+    X_seq, y_seq = [], []
+    N = len(X)
+    for i in range(0, N - seq_length, stride):
+        start = i
+        end = i + seq_length
+        if target_pos == 'mid':
+            t_idx = start + seq_length // 2
+        elif target_pos == 'end':
+            t_idx = end if end < N else (N - 1)
+        else:
+            t_idx = start + seq_length // 2
+        X_seq.append(X[start:end])
+        y_seq.append(y[t_idx])
+    return np.array(X_seq), np.array(y_seq)
+
+def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], source_locations=['LA', 'Offenbach'], resample_rule='5min'):
+    """
+    Load data split by location for Domain Adaptation tasks.
+    Args:
+        base_path: Path to data
+        target_locations: List of locations to use for testing (Target Domain)
+        source_locations: List of locations to use for training (Source Domain)
+        resample_rule: Pandas resampling rule (e.g., '5min' for 5 minutes). None to disable.
+    """
+    train_dfs = []
+    test_dfs = []
+    
+    facilities = ['Dealer', 'Logistic', 'Office']
+    
+    print(f"Loading Data from: {base_path}")
+    if resample_rule:
+        print(f"⚠️ Resampling data to {resample_rule} intervals (Paper Requirement)")
+    
+    for facility in facilities:
+        # Load Source Domain (Training Data)
+        for loc in source_locations:
+            file_path = Path(base_path) / facility / f'augmented_{facility}_{loc}.csv'
+            if file_path.exists():
+                df = pd.read_csv(file_path)
+                
+                # Resample if requested (Paper uses 5-min intervals)
+                if resample_rule:
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
+                        df = df.set_index('timestamp').resample(resample_rule).mean().dropna().reset_index()
+                    else:
+                        # Fallback: Group by index // 5 for 1-min to 5-min conversion
+                        # Assuming 1-min data if no timestamp
+                        df = df.groupby(df.index // 5).mean()
+                
+                df['facility'] = facility
+                df['location'] = loc
+                df['domain'] = 'source'
+                train_dfs.append(df)
+                print(f"  [TRAIN/Source] Loaded {facility}_{loc}: {len(df)} samples")
+            else:
+                print(f"  [WARN] File not found: {file_path}")
+                
+        # Load Target Domain (Testing Data)
+        for loc in target_locations:
+            file_path = Path(base_path) / facility / f'augmented_{facility}_{loc}.csv'
+            if file_path.exists():
+                df = pd.read_csv(file_path)
+                
+                # Resample
+                if resample_rule:
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
+                        df = df.set_index('timestamp').resample(resample_rule).mean().dropna().reset_index()
+                    else:
+                        df = df.groupby(df.index // 5).mean()
+
+                df['facility'] = facility
+                df['location'] = loc
+                df['domain'] = 'target'
+                test_dfs.append(df)
+                print(f"  [TEST/Target]  Loaded {facility}_{loc}: {len(df)} samples")
+            else:
+                print(f"  [WARN] File not found: {file_path}")
+    
+    if not train_dfs or not test_dfs:
+        raise ValueError("Could not load data. Check paths and locations.")
+
+    train_df = pd.concat(train_dfs, ignore_index=True)
+    test_df = pd.concat(test_dfs, ignore_index=True)
+    
+    print(f"\\nTotal Training Samples (Source): {len(train_df)}")
+    print(f"Total Testing Samples (Target): {len(test_df)}")
+    
+    return train_df, test_df
+
+from sklearn.preprocessing import RobustScaler
+
+def preprocess_data(train_df, test_df, appliance_columns=['EVSE', 'PV', 'CS', 'CHP', 'BA']):
+    """
+    Preprocess data using RobustScaler as per the paper.
+    """
+    # 1. Prepare Training Data (Source Domain)
+    X_train_raw = train_df['Aggregate'].values.reshape(-1, 1)
+    y_train_raw = train_df[appliance_columns].values
+
+    # 2. Prepare Testing Data (Target Domain)
+    X_test_raw = test_df['Aggregate'].values.reshape(-1, 1)
+    y_test_raw = test_df[appliance_columns].values
+
+    # 3. Normalize using RobustScaler
+    # Important: Fit scaler ONLY on training data to avoid data leakage
+    scaler_X = RobustScaler()
+    scaler_y = RobustScaler()
+
+    # Fit on Train, Transform Train
+    X_train_scaled = scaler_X.fit_transform(X_train_raw)
+    y_train_scaled = scaler_y.fit_transform(y_train_raw)
+
+    # Transform Test (using Train statistics)
+    X_test_scaled = scaler_X.transform(X_test_raw)
+    y_test_scaled = scaler_y.transform(y_test_raw)
+    
+    return X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled, scaler_X, scaler_y
