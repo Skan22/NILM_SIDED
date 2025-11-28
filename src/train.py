@@ -7,21 +7,23 @@ import math
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, 
-                 early_stopping_patience=5, model_name='Model', gradient_clip=1.0):
-    """Optimized training with validation, early stopping, AMP, and monitoring"""
+
+def train_single_appliance_model(model, train_loader, val_loader, criterion, optimizer, 
+                                  scheduler, num_epochs, device, early_stopping_patience, 
+                                  model_name, appliance_name):
+    """
+    Optimized training loop for single-appliance models.
+    Includes: AMP, Gradient Clipping, set_to_none=True, Parameter Logging, and Robustness Checks.
+    """
     model.to(device)
     use_amp = (device.type == 'cuda')
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     
-    history = {'train_loss': [], 'val_loss': [], 'epoch_times': [], 'learning_rates': []}
     best_val_loss = float('inf')
     patience_counter = 0
     best_model_state = None
     
-    print(f"\\n{'='*60}\\nTraining {model_name}\\n{'='*60}")
-    
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs), desc=f'Training {model_name} | {appliance_name}'):
         epoch_start_time = time.time()
         model.train()
         train_loss = 0.0
@@ -30,7 +32,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         for batch_X, batch_y in progress_bar:
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
+            
+            
             
             with torch.cuda.amp.autocast(enabled=use_amp):
                 outputs = model(batch_X)
@@ -39,14 +42,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     print("⚠️ Detected non-finite model outputs. Clamping and continuing.")
                     outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e6, neginf=-1e6)
                 loss = criterion(outputs, batch_y)
-            
+            optimizer.zero_grad(set_to_none=True)
             if (not math.isfinite(loss.item())) or math.isnan(loss.item()):
                 print(f"❌ Invalid loss (NaN/Inf) at epoch {epoch+1}. Stopping training for {model_name}.")
-                return history
+                break
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             
@@ -55,13 +58,14 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         
         avg_train_loss = train_loss / max(1, len(train_loader))
         
-        # Validation
         model.eval()
         val_loss = 0.0
+        
         with torch.inference_mode():
             for batch_X, batch_y in val_loader:
                 batch_X = batch_X.to(device, non_blocking=True)
                 batch_y = batch_y.to(device, non_blocking=True)
+                
                 with torch.cuda.amp.autocast(enabled=use_amp):
                     outputs = model(batch_X)
                     if not torch.isfinite(outputs).all():
@@ -71,14 +75,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         
         avg_val_loss = val_loss / max(1, len(val_loader))
         epoch_time = time.time() - epoch_start_time
+        
+        scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
-        history['train_loss'].append(avg_train_loss)
-        history['val_loss'].append(avg_val_loss)
-        history['epoch_times'].append(epoch_time)
-        history['learning_rates'].append(current_lr)
         
         print(f"Epoch {epoch+1}/{num_epochs} | Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | LR: {current_lr:.6f} | Time: {epoch_time:.2f}s")
-        scheduler.step()
         
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -90,99 +91,95 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 print(f"⚠️ Early stopping at epoch {epoch+1}. Best val loss: {best_val_loss:.6f}")
                 break
     
-    if best_model_state is not None:
+    if best_model_state:
         model.load_state_dict(best_model_state)
         print(f"✅ Restored best model with val_loss: {best_val_loss:.6f}")
-    return history
+    
+    return model
 
-def evaluate_model(model, test_loader, criterion, device):
-    """Optimized evaluation with memory efficiency + AMP and stability checks"""
-    model.to(device)
+
+def evaluate_single_appliance_model(model, test_loader, device, scaler_y, appliance_name):
+    """
+    Optimized evaluation for single-appliance models using inference_mode and tqdm.
+    """
     model.eval()
-    use_amp = (device.type == 'cuda')
     all_predictions = []
     all_targets = []
-    test_loss = 0.0
     
-    with torch.no_grad():
-        for batch_X, batch_y in tqdm(test_loader, desc='Evaluating', leave=False):
+    with torch.inference_mode():
+        for batch_X, batch_y in tqdm(test_loader, desc=f'Evaluating {appliance_name}', leave=False):
             batch_X = batch_X.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
-            with torch.cuda.amp.autocast(enabled=use_amp):
-                outputs = model(batch_X)
-                if not torch.isfinite(outputs).all():
-                    outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e6, neginf=-1e6)
-                loss = criterion(outputs, batch_y)
-            test_loss += loss.item()
+            
+            outputs = model(batch_X)
+            
             all_predictions.append(outputs.cpu().numpy())
             all_targets.append(batch_y.cpu().numpy())
-    
+            
     predictions = np.vstack(all_predictions)
     targets = np.vstack(all_targets)
     
-    # Sanitize any non-finite values before metric computations
+    # Sanitize predictions
     if not np.isfinite(predictions).all():
         print("⚠️ Non-finite predictions detected. Replacing with zeros.")
         predictions = np.nan_to_num(predictions, nan=0.0, posinf=1e6, neginf=-1e6)
-    if not np.isfinite(targets).all():
-        print("⚠️ Non-finite targets detected. Replacing with zeros.")
-        targets = np.nan_to_num(targets, nan=0.0, posinf=1e6, neginf=-1e6)
+        
+    metrics = calculate_single_appliance_metrics(targets, predictions, appliance_name, scaler_y)
+    metrics['parameters'] = count_parameters(model)
     
-    avg_test_loss = test_loss / max(1, len(test_loader))
-    if device.type == 'cuda':
-        torch.cuda.empty_cache()
-    return predictions, targets, avg_test_loss
+    return metrics, predictions, targets
 
-def calculate_metrics(targets, predictions, appliance_names, scaler_y):
-    """Calculate and print metrics per appliance with robust sanitization"""
-    results = {}
+
+def calculate_single_appliance_metrics(targets, predictions, appliance_name, scaler_y):
+    """Calculate metrics for a single appliance with robust sanitization."""
     
-    # Inverse transform to get real power values (Watts)
-    targets_real = scaler_y.inverse_transform(targets)
-    predictions_real = scaler_y.inverse_transform(predictions)
+    # Sanitize inputs
+    predictions = np.nan_to_num(predictions, nan=0.0, posinf=0.0, neginf=0.0)
+    predictions = np.clip(predictions, -10.0, 10.0) # Clip scaled values to reasonable range
     
-    # Sanitize non-finite values post inverse transform
-    def sanitize(arr, name):
-        if not np.isfinite(arr).all():
-            finite_mask = np.isfinite(arr)
-            if finite_mask.any():
-                median_vals = np.median(arr[finite_mask], axis=0)
-                arr[~finite_mask] = median_vals
-            else:
-                arr[:] = 0.0
-            print(f"⚠️ Sanitized non-finite values in {name}.")
-        # Clamp extreme outliers to 10x max(abs(targets)) to avoid metric distortion
-        max_ref = np.max(np.abs(targets_real)) if np.isfinite(targets_real).any() else 1.0
-        arr[:] = np.clip(arr, -10*max_ref, 10*max_ref)
-        return arr
+    targets = np.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
+    targets = np.clip(targets, -10.0, 10.0)
     
-    predictions_real = sanitize(predictions_real, 'predictions_real')
-    targets_real = sanitize(targets_real, 'targets_real')
+    # Inverse transform to original scale
+    targets_real = scaler_y.inverse_transform(targets.astype(np.float64)).astype(np.float32)
+    predictions_real = scaler_y.inverse_transform(predictions.astype(np.float64)).astype(np.float32)
     
-    # Correctly handle negative values (Generation vs Load)
+    # Apply physical constraints
     load_appliances = ['EVSE', 'CS', 'BA']
     generation_appliances = ['PV', 'CHP']
     
-    print("\\n" + "="*80)
-    print("       PER-APPLIANCE PERFORMANCE METRICS")
-    print("="*80)
-    print(f"{'Appliance':<10} | {'MAE (W)':<10} | {'MAE (MW)':<10} | {'MSE (MW²)':<12} | {'R2 Score':<10}")
-    print("-" * 80)
+    if appliance_name in load_appliances:
+        predictions_real = np.maximum(predictions_real, 0)  # Loads are non-negative
+    elif appliance_name in generation_appliances:
+        predictions_real = np.minimum(predictions_real, 0)  # Generation is non-positive
     
-    for i, app_name in enumerate(appliance_names):
-        if app_name in load_appliances:
-            predictions_real[:, i] = np.maximum(predictions_real[:, i], 0)
-        elif app_name in generation_appliances:
-            predictions_real[:, i] = np.minimum(predictions_real[:, i], 0)
-            
-        mae_w = mean_absolute_error(targets_real[:, i], predictions_real[:, i])
-        mse_w = mean_squared_error(targets_real[:, i], predictions_real[:, i])
-        r2 = r2_score(targets_real[:, i], predictions_real[:, i])
-        mae_mw = mae_w / 1e6
-        mse_mw = mse_w / (1e6 ** 2)
-        
-        results[app_name] = {'MAE_W': mae_w, 'MAE_MW': mae_mw, 'MSE_W': mse_w, 'MSE_MW2': mse_mw, 'R2': r2}
-        print(f"{app_name:<10} | {mae_w:<10.2f} | {mae_mw:<10.6f} | {mse_mw:<12.6f} | {r2:<10.4f}")
+    # Calculate metrics
+    mae_w = mean_absolute_error(targets_real, predictions_real)
+    mse_w = mean_squared_error(targets_real, predictions_real)
+    r2 = r2_score(targets_real, predictions_real)
     
-    print("="*80)
-    return results, predictions_real, targets_real
+    # Convert to MW for readability
+    mae_mw = mae_w / 1e6
+    mse_mw = mse_w / (1e6 ** 2)
+    
+    # Calculate NDE (Normalized Disaggregation Error)
+    numerator = np.sum(np.abs(targets_real - predictions_real))
+    denominator = np.sum(np.abs(targets_real))
+    nde = numerator / denominator if denominator > 0 else float('inf')
+    
+    metrics = {
+        'MAE_W': float(mae_w),
+        'MAE_MW': float(mae_mw),
+        'MSE_W': float(mse_w),
+        'MSE_MW2': float(mse_mw),
+        'R2': float(r2),
+        'NDE': float(nde)
+    }
+    
+    print(f"\n{appliance_name} Metrics:")
+    print(f"  MAE: {mae_w:.2f} W ({mae_mw:.6f} MW)")
+    print(f"  MSE: {mse_w:.2f} W² ({mse_mw:.6f} MW²)")
+    print(f"  R²:  {r2:.4f}")
+    print(f"  NDE: {nde:.4f}")
+    
+    return metrics
