@@ -1,11 +1,17 @@
-pandas
-numpy
-torch
-torchvision
-torchaudio
-scikit-learn
-matplotlib
-seaborn
-tqdm
-jupyter
-notebook
+# SIDED-NILM Requirements
+
+# Core Dependencies
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+tqdm>=4.65.0
+
+# Optional: For faster data loading
+# pyarrow>=12.0.0

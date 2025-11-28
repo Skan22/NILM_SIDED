@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
+from sklearn.preprocessing import RobustScaler
 
 class NILMDataset(Dataset):
     def __init__(self, X, y):
@@ -41,7 +42,7 @@ def create_sequences(X, y, seq_length, stride=1, target_pos='mid'):
 
 def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], source_locations=['LA', 'Offenbach'], resample_rule='5min'):
     """
-    Load data split by location for Domain Adaptation tasks.
+    Load data split by location for Domain Adaptation tasks with robust missing value handling.
     Args:
         base_path: Path to data
         target_locations: List of locations to use for testing (Target Domain)
@@ -52,6 +53,7 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
     test_dfs = []
     
     facilities = ['Dealer', 'Logistic', 'Office']
+    appliance_columns = ['EVSE', 'PV', 'CS', 'CHP', 'BA', 'Aggregate']
     
     print(f"Loading Data from: {base_path}")
     if resample_rule:
@@ -64,6 +66,16 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
             if file_path.exists():
                 df = pd.read_csv(file_path)
                 
+                # Check for missing values BEFORE processing
+                missing_before = df[appliance_columns].isnull().sum().sum()
+                if missing_before > 0:
+                    print(f"  ⚠️ Found {missing_before} missing values in {facility}_{loc}")
+                    # Forward fill then backward fill to handle missing values
+                    df[appliance_columns] = df[appliance_columns].fillna(method='ffill').fillna(method='bfill')
+                    # If still NaN (entire column is NaN), fill with 0
+                    df[appliance_columns] = df[appliance_columns].fillna(0)
+                    print(f"  ✅ Missing values handled via forward/backward fill")
+                
                 # Resample if requested (Paper uses 5-min intervals)
                 if resample_rule:
                     if 'timestamp' in df.columns:
@@ -74,6 +86,12 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
                         # Assuming 1-min data if no timestamp
                         df = df.groupby(df.index // 5).mean()
                 
+                # Final check after resampling
+                missing_after = df[appliance_columns].isnull().sum().sum()
+                if missing_after > 0:
+                    print(f"  ⚠️ {missing_after} NaN values after resampling, filling with 0")
+                    df[appliance_columns] = df[appliance_columns].fillna(0)
+
                 df['facility'] = facility
                 df['location'] = loc
                 df['domain'] = 'source'
@@ -88,6 +106,14 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
             if file_path.exists():
                 df = pd.read_csv(file_path)
                 
+                # Check for missing values BEFORE processing
+                missing_before = df[appliance_columns].isnull().sum().sum()
+                if missing_before > 0:
+                    print(f"  ⚠️ Found {missing_before} missing values in {facility}_{loc}")
+                    df[appliance_columns] = df[appliance_columns].fillna(method='ffill').fillna(method='bfill')
+                    df[appliance_columns] = df[appliance_columns].fillna(0)
+                    print(f"  ✅ Missing values handled via forward/backward fill")
+                
                 # Resample
                 if resample_rule:
                     if 'timestamp' in df.columns:
@@ -95,6 +121,12 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
                         df = df.set_index('timestamp').resample(resample_rule).mean().dropna().reset_index()
                     else:
                         df = df.groupby(df.index // 5).mean()
+                
+                # Final check after resampling
+                missing_after = df[appliance_columns].isnull().sum().sum()
+                if missing_after > 0:
+                    print(f"  ⚠️ {missing_after} NaN values after resampling, filling with 0")
+                    df[appliance_columns] = df[appliance_columns].fillna(0)
 
                 df['facility'] = facility
                 df['location'] = loc
@@ -110,12 +142,32 @@ def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], 
     train_df = pd.concat(train_dfs, ignore_index=True)
     test_df = pd.concat(test_dfs, ignore_index=True)
     
-    print(f"\\nTotal Training Samples (Source): {len(train_df)}")
+    # Final validation: Check for any remaining NaN or inf values
+    print(f"\n{'='*60}")
+    print("Data Quality Check:")
+    print(f"{'='*60}")
+    
+    for df_name, df in [("Training", train_df), ("Testing", test_df)]:
+        nan_count = df[appliance_columns].isnull().sum().sum()
+        inf_count = np.isinf(df[appliance_columns].select_dtypes(include=[np.number])).sum().sum()
+        
+        print(f"{df_name} Data:")
+        print(f"  Total Samples: {len(df)}")
+        print(f"  NaN values: {nan_count}")
+        print(f"  Inf values: {inf_count}")
+        
+        if nan_count > 0 or inf_count > 0:
+            print(f"  ⚠️ WARNING: Data quality issues detected!")
+            # Clean up any remaining issues
+            df[appliance_columns] = df[appliance_columns].replace([np.inf, -np.inf], np.nan)
+            df[appliance_columns] = df[appliance_columns].fillna(0)
+            print(f"  ✅ Cleaned: Replaced inf/nan with 0")
+    
+    print(f"{'='*60}\n")
+    print(f"Total Training Samples (Source): {len(train_df)}")
     print(f"Total Testing Samples (Target): {len(test_df)}")
     
     return train_df, test_df
-
-from sklearn.preprocessing import RobustScaler
 
 def preprocess_data(train_df, test_df, appliance_columns=['EVSE', 'PV', 'CS', 'CHP', 'BA']):
     """

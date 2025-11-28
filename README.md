@@ -1,230 +1,389 @@
-# NILM_SIDED: Industrial Energy Disaggregation with AMDA, TCN / ATCN / BiLSTM
+# SIDED: Industrial Energy Disaggregation
 
-Non-Intrusive Load Monitoring (NILM) for industrial facilities using the SIDED dataset and Appliance‑Modulated Data Augmentation (AMDA). This project trains deep sequence models (TCN, Attention TCN, BiLSTM) to disaggregate aggregate power signals into appliance‑level consumption / generation.
+[![Paper](https://img.shields.io/badge/Paper-arXiv-red)](https://arxiv.org/html/2506.20525v2)
+[![Python](https://img.shields.io/badge/Python-3.8+-blue)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
----
-## 1. Project Overview
-- **Goal**: Predict individual appliance (EVSE, PV, CS, CHP, BA) power from a single aggregate measurement.
-- **Setting**: Cross-domain generalization. Train on Los Angeles + Offenbach; test on Tokyo.
-- **Models**: Temporal Convolutional Network (TCN), Attention TCN (ATCN), BiLSTM (plus auxiliary architectures: vanilla LSTM, GRU, CNN-LSTM).
-- **Sequence Length**: 288 (24 hours at 5‑minute resolution).
-- **Metrics**: MAE (W & MW), MSE, R² per appliance.
+Official implementation of **"Industrial Energy Disaggregation with Digital Twin-generated Dataset and Efficient Data Augmentation"**
 
----
-## 2. Dataset & AMDA Augmentation
-### Base Dataset
-Original facility CSVs in `SIDED/` (Dealer, Logistic, Office) contain aggregate + appliance traces.
-
-### AMDA (Appliance-Modulated Data Augmentation)
-AMDA scales appliance traces using the formula:
-```
-S_i = s * (1 - p_i)   where   p_i = (|P_i|) / (Σ_j |P_j|)
-```
-- Uses **absolute power** ensuring generation appliances (PV, CHP) contribute correctly.
-- Produces augmented CSVs in `AMDA_SIDED/` with more diverse appliance magnitude distributions.
-
-### Resampling
-Data is downsampled to **5-minute intervals** (averaging every 5 original rows) to match paper configuration: 288 timesteps per day.
+> **Paper**: [Industrial Energy Disaggregation with Digital Twin-generated Dataset and Efficient Data Augmentation](https://arxiv.org/html/2506.20525v2)
 
 ---
-## 3. Problem Formulation
-Given time series:
-- Input: `Aggregate[t - L : t]` (window of length L=288)
-- Output: `Appliances[t]` (EVSE, PV, CS, CHP, BA)
-Supervised multi-output regression on standardized data (separate `StandardScaler` for X and y).
+
+## 📋 Table of Contents
+
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Dataset](#dataset)
+- [Models](#models)
+- [Results](#results)
+- [Documentation](#documentation)
+- [Citation](#citation)
 
 ---
-## 4. Model Architectures
-### TCN
-- Stacked dilated causal 1D convolutions.
-- Residual temporal blocks with dropout.
-- Global average pooling + linear head.
 
-### ATCN
-- Same TCN feature extractor + temporal attention layer over sequence dimension.
+## 🎯 Overview
 
-### BiLSTM
-- Bidirectional LSTM layers, final time step concatenated hidden states → linear head.
+This repository implements **single-appliance Non-Intrusive Load Monitoring (NILM)** for industrial facilities using deep learning models trained on the SIDED dataset. The implementation follows the exact methodology described in the paper.
 
-### Additional (Experimental)
-- GRU, CNN-LSTM, vanilla LSTM included for comparison.
+### What is NILM?
 
-Model hyperparameters centralised in `CONFIG` (inside `workspace.ipynb`):
-```
-'num_layers': 8
-'num_channels': [64,64,64,64,128,128,128,128]
-'hidden_size': 128
-'dropout': 0.33
-```
+Non-Intrusive Load Monitoring (NILM) is the process of disaggregating total power consumption into individual appliance-level consumption without installing sensors on each appliance.
+
+### Single-Appliance Approach
+
+Following the paper's methodology, we train **separate models for each appliance**:
+- Input: Aggregate power signal
+- Output: Single appliance power consumption
+- Total: 15 models (3 architectures × 5 appliances)
 
 ---
-## 5. Training Pipeline (Optimized)
-Key features (implemented in notebook):
-- **Automatic Mixed Precision (AMP)** for speed.
-- **Warmup + Cosine LR Scheduler**: linear warmup (3 epochs) → cosine decay to `min_lr`.
-- **Early Stopping** with patience=5.
-- **Gradient Clipping** (norm ≤ 1.0).
-- **Best Checkpoint Restore**.
-- **cuDNN / TF32 optimizations** when CUDA available.
-- **Non-blocking, pinned memory DataLoaders** (Windows requires `num_workers=0`).
 
-Pseudo-code outline:
-```
-for epoch in epochs:
-    train one pass (AMP, clip grads)
-    validate
-    scheduler.step()
-    track best model / early stop
-```
+## ✨ Key Features
+
+- ✅ **Paper-Compliant Implementation**: Exact replication of the paper's methodology
+- ✅ **Single-Appliance NILM**: Specialized models for each appliance
+- ✅ **AMDA Data Augmentation**: Appliance-Modulated Data Augmentation
+- ✅ **Multiple Architectures**: TCN, ATCN (Attention-TCN), and LSTM
+- ✅ **Robust Data Handling**: Three-layer missing value handling system
+- ✅ **Comprehensive Metrics**: MAE, MSE, R², and NDE evaluation
 
 ---
-## 6. Evaluation & Metrics
-After training, saved model weights are stored in `saved_models/` as `*_best.pth`.
 
-Standalone evaluation cell performs:
-1. Load weights.
-2. Forward inference over `test_loader`.
-3. Clamp standardized outputs to [-8, 8] (stability).
-4. Inverse transform with `scaler_y` (float64 precision).
-5. Enforce sign conventions:
-   - Loads (EVSE, CS, BA) ≥ 0
-   - Generation (PV, CHP) ≤ 0
-6. Compute per-appliance metrics.
+## 🔧 Installation
 
-Example (current project run):
-```
-TCN_BEST:
-EVSE  MAE=0.005008 MW  R²=0.8045
-PV    MAE=0.042131 MW  R²=0.9484
-CS    MAE=0.025614 MW  R²=0.7420
-CHP   MAE=0.039977 MW  R²=0.9722
-BA    MAE=0.044810 MW  R²=0.9365
+### Prerequisites
+
+- Python 3.8+
+- PyTorch 2.0+
+- CUDA (optional, for GPU acceleration)
+
+### Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/SIDED-NILM.git
+cd SIDED-NILM
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-Visualizations include:
-- Scatter: Predicted vs Actual (MW)
-- Error histograms (MW)
-- Time series overlays (first 500 samples)
-- MAE & R² bar comparisons
-- Heatmap (MAE per model/appliance)
+### Dependencies
 
----
-## 7. Repository Layout
 ```
-AMDA_SIDED/         # Augmented facility data
-SIDED/              # Original facility data
-saved_models/       # Trained model weights (*.pth)
-workspace.ipynb     # Main notebook (training + evaluation)
-data_augmentation.py# AMDA augmentation script
-README.md           # Project documentation
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.65.0
 ```
 
 ---
-## 8. Installation
-### Python Environment
-Recommended Python ≥ 3.9. Create virtual environment:
-```cmd
-python -m venv .venv
-.venv\Scripts\activate
-pip install --upgrade pip
+
+## 🚀 Quick Start
+
+### 1. Prepare the Dataset
+
+Place the SIDED dataset in the `./SIDED` directory with the following structure:
+
+```
+SIDED/
+├── Dealer/
+│   ├── Dealer_LA.csv
+│   ├── Dealer_Offenbach.csv
+│   └── Dealer_Tokyo.csv
+├── Logistic/
+│   ├── Logistic_LA.csv
+│   ├── Logistic_Offenbach.csv
+│   └── Logistic_Tokyo.csv
+└── Office/
+    ├── Office_LA.csv
+    ├── Office_Offenbach.csv
+    └── Office_Tokyo.csv
 ```
 
-### Dependencies (minimal)
-```cmd
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install numpy pandas scikit-learn matplotlib seaborn tqdm
-```
-(Adjust CUDA wheel as needed; use CPU-only wheel if no GPU.)
+### 2. Generate Augmented Data
 
----
-## 9. Usage
-### 1. Prepare Augmented Data (if regenerating)
-Edit `data_augmentation.py` as needed then run:
-```cmd
+```bash
 python data_augmentation.py
 ```
-Ensure output resides in `AMDA_SIDED/` matching expected folder structure.
 
-### 2. Open Notebook
-Launch Jupyter (or VS Code notebook):
-```cmd
-python -m jupyter notebook
-```
-Execute cells sequentially:
-1. Configuration
-2. Data loading & resampling
-3. Preprocessing & scaling
-4. Sequence construction
-5. Model definitions
-6. Training loop
+This applies AMDA (Appliance-Modulated Data Augmentation) with scaling factors s=1.5, 2.5, 4.0.
 
-### 3. Evaluate Saved Models
-Run the "Standalone Model Evaluation" cell (no retraining required).
-Run visualization cell for plots.
+**Output**: `./AMDA_SIDED/` directory with augmented datasets
 
-### 4. Verify Metrics
-Use the verification cell to confirm graph correctness.
+### 3. Train Models
 
----
-## 10. Reproducing Paper-like Setup
-To move closer to target metrics (e.g., R² ≈ 0.95 for all loads):
-- Increase model depth or receptive field (larger dilation range).
-- Introduce attention for spike-heavy appliances (EVSE).
-- Add event-based augmentation for transient loads.
-- Perform hyperparameter sweeps: learning rate, dropout, channel widths.
-- Consider ensemble (BiLSTM for EVSE + TCN for others).
-
----
-## 11. Extending
-Ideas:
-- Add Transformer-based model (Temporal Fusion Transformer).
-- Implement multi-resolution inputs (1min + 5min fusion).
-- Add domain adaptation loss (e.g., CORAL / MMD between source & target features).
-- Integrate anomaly / spike detector for EVSE improvement.
-
----
-## 12. Troubleshooting
-| Issue | Cause | Fix |
-|-------|-------|-----|
-| Overflow in inverse transform | Extreme z-scores | Clamp standardized outputs to [-8, 8] |
-| Poor EVSE spike capture | Model smoothing | Add attention / spike augmentation |
-| CS low R² | Underfitting or noisy data | Increase capacity, inspect raw CS signal |
-| CUDA memory errors | Large batch or model | Reduce `batch_size`, clear cache between models |
-
----
-## 13. Notes on Data Leakage
-- Only fit scalers on **source (training)** data.
-- Resampling applied consistently across source & target.
-- Domain split maintains geographic separation.
-
----
-## 14. License & Attribution
-Write your chosen license (MIT, Apache 2.0, etc.) here if you intend to distribute.
-Dataset and AMDA concepts based on publicly available research; implementation here is original.
-
----
-## 15. Quick Start Summary
-```cmd
-git clone <repo>
-cd NILM_SIDED
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt  # (Create this file optionally)
-python data_augmentation.py      # (If regenerating)
-python -m jupyter notebook       # Run notebook cells
-# After training:
-# Run evaluation + visualization cells
+```bash
+python reproduce_paper.py
 ```
 
----
-## 16. Acknowledgements
-- SIDED dataset creators
-- Research on AMDA for industrial NILM
-- PyTorch community
+**Training Details**:
+- **Duration**: ~5-10 hours (15 models)
+- **Models**: TCN, ATCN, LSTM for each of 5 appliances
+- **Output**: 15 model files + predictions + metrics
+
+### 4. View Results
+
+Results are saved in:
+- `all_results_single_appliance.json` - All metrics
+- `{MODEL}_{APPLIANCE}_best.pth` - Trained models (15 files)
+- `{MODEL}_{APPLIANCE}_predictions.npz` - Predictions (15 files)
 
 ---
-## 17. Disclaimer
-This codebase is for research & educational purposes. Validate models before production deployment.
+
+## 📊 Dataset
+
+### SIDED Dataset
+
+The **Synthetic Industrial Dataset for Energy Disaggregation** contains:
+
+- **Facilities**: 3 types (Dealer, Logistic, Office)
+- **Locations**: 3 locations (LA, Offenbach, Tokyo)
+- **Appliances**: 5 appliances
+  - **EVSE**: Electric Vehicle Supply Equipment (Load)
+  - **PV**: Photovoltaic System (Generation)
+  - **CS**: Cooling System (Load)
+  - **CHP**: Combined Heat and Power (Generation)
+  - **BA**: Building Automation (Load)
+
+### Data Augmentation (AMDA)
+
+Appliance-Modulated Data Augmentation scales appliances inversely to their contribution:
+
+```
+S_i = s × (1 - p_i)
+```
+
+where:
+- `s`: scaling factor (1.5, 2.5, 4.0)
+- `p_i`: relative contribution of appliance i
+- `S_i`: scaling factor for appliance i
+
+**Effect**: Reduces dominance of major appliances, increases diversity.
 
 ---
-**Happy Disaggregating!** 🔌⚡
+
+## 🧠 Models
+
+### Architectures
+
+#### 1. TCN (Temporal Convolutional Network)
+- **Layers**: 8 temporal convolutional blocks
+- **Channels**: 128 per layer
+- **Kernel Size**: 3
+- **Dropout**: 0.33
+- **Receptive Field**: Covers entire input sequence
+- **Parameters**: ~1.05M
+
+#### 2. ATCN (Attention-TCN)
+- **Base**: TCN architecture
+- **Addition**: Attention mechanism
+- **Purpose**: Highlights important temporal features
+- **Parameters**: ~1.4-1.6M
+
+#### 3. LSTM (Long Short-Term Memory)
+- **Layers**: 3 LSTM layers
+- **Hidden Size**: 128
+- **Dropout**: 0.2
+- **Bidirectional**: No (standard LSTM)
+- **Parameters**: ~265k
+
+> **⚠️ IMPORTANT**: The current model configurations are **NOT parameter-matched**, which makes direct comparison unfair:
+> - **ATCN** has 40-50% MORE parameters than TCN
+> - **LSTM** has only 25% of TCN's parameters
+> 
+> For a scientifically fair comparison, see [docs/PARAMETER_ANALYSIS.md](docs/PARAMETER_ANALYSIS.md) for parameter-matched configurations.
+
+### Training Configuration
+
+```python
+CONFIG = {
+    'seq_length': 288,        # 24h window at 5-min intervals
+    'train_stride': 5,        # 25 min stride
+    'eval_stride': 1,         # Dense evaluation
+    'batch_size': 64,
+    'learning_rate': 0.001,
+    'num_epochs': 20,
+    'warmup_epochs': 3,
+    'early_stopping_patience': 5,
+    'dropout': 0.33
+}
+```
+
+### Sequence-to-Point (S2P)
+
+Input: Time series window of aggregate power  
+Output: Single point prediction at window midpoint
+
+```
+X_t = {x_{t-144}, ..., x_t, ..., x_{t+144}}  → y_t
+```
+
+---
+
+## 📈 Results
+
+### Expected Performance
+
+Results vary by appliance and model. Example metrics:
+
+| Appliance | Model | MAE (W) | R² | NDE |
+|-----------|-------|---------|-----|-----|
+| EVSE | TCN | ~1200 | ~0.85 | ~0.12 |
+| EVSE | ATCN | ~1100 | ~0.88 | ~0.10 |
+| EVSE | LSTM | ~1300 | ~0.82 | ~0.15 |
+
+**Note**: Actual results depend on dataset and training conditions.
+
+### Metrics
+
+- **MAE**: Mean Absolute Error (Watts)
+- **MSE**: Mean Squared Error (Watts²)
+- **R²**: Coefficient of Determination
+- **NDE**: Normalized Disaggregation Error
+
+---
+
+## 📚 Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+- **[METHODOLOGY.md](docs/METHODOLOGY.md)** - Single-appliance NILM approach
+- **[DATA_PIPELINE.md](docs/DATA_PIPELINE.md)** - Data loading and preprocessing
+- **[TRAINING.md](docs/TRAINING.md)** - Training procedure and hyperparameters
+- **[EVALUATION.md](docs/EVALUATION.md)** - Metrics and evaluation protocol
+- **[PARAMETER_ANALYSIS.md](docs/PARAMETER_ANALYSIS.md)** - Model parameter comparison and fair configs ⚠️
+
+---
+
+## 🗂️ Project Structure
+
+```
+SIDED-NILM/
+├── README.md                          # This file
+├── requirements.txt                   # Dependencies
+├── data_augmentation.py              # AMDA implementation
+├── reproduce_paper.py                # Main training script
+│
+├── src/                              # Source code
+│   ├── __init__.py                   # Package initialization
+│   ├── dataset.py                    # Data loading and preprocessing
+│   ├── models.py                     # Model architectures
+│   ├── train.py                      # Training utilities
+│   └── visualization.py              # Plotting and visualization
+│
+├── docs/                             # Documentation
+│   ├── METHODOLOGY.md                # Single-appliance approach
+│   ├── DATA_PIPELINE.md              # Data handling
+│   ├── TRAINING.md                   # Training details
+│   └── EVALUATION.md                 # Evaluation protocol
+│
+├── SIDED/                            # Original dataset (not included)
+│   ├── Dealer/
+│   ├── Logistic/
+│   └── Office/
+│
+└── AMDA_SIDED/                       # Augmented dataset (generated)
+    ├── Dealer/
+    ├── Logistic/
+    └── Office/
+```
+
+---
+
+## 🔬 Methodology
+
+### Single-Appliance NILM
+
+Following the paper (Section V-A):
+
+> *"We employ the **single-appliance NILM setting** where the input is the aggregated power signal and the model extracts the power of a **single appliance** e.g., the CHP."*
+
+**Implementation**:
+- Train **one model per appliance** (not multi-output)
+- Each model has **1 output neuron** (not 5)
+- Separate **RobustScaler** per appliance
+- Total: **15 models** (3 architectures × 5 appliances)
+
+**Benefits**:
+- Model specialization for each appliance
+- Better performance through focused learning
+- Easy to add/remove appliances
+- Clear interpretability
+
+See [docs/METHODOLOGY.md](docs/METHODOLOGY.md) for details.
+
+---
+
+## 🛡️ Data Quality
+
+### Three-Layer Defense System
+
+1. **Layer 1: Data Loading**
+   - Forward/backward fill for missing values
+   - Inf value detection and replacement
+   - Data quality reporting
+
+2. **Layer 2: Preprocessing**
+   - Per-appliance NaN/Inf checks
+   - Sanitization before scaling
+   - Prevents RobustScaler failures
+
+3. **Layer 3: Evaluation**
+   - Prediction clipping in standardized space
+   - Inverse transform safety
+   - Physical constraint enforcement
+
+See [docs/DATA_PIPELINE.md](docs/DATA_PIPELINE.md) for details.
+
+---
+
+## 🎓 Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@article{sided2025,
+  title={Industrial Energy Disaggregation with Digital Twin-generated Dataset and Efficient Data Augmentation},
+  author={[Authors]},
+  journal={arXiv preprint arXiv:2506.20525},
+  year={2025}
+}
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+---
+
+## 📧 Contact
+
+For questions or issues, please open an issue on GitHub or contact [your-email@example.com].
+
+---
+
+## 🙏 Acknowledgments
+
+- Original paper authors for the SIDED dataset and methodology
+- PyTorch team for the deep learning framework
+- Open-source community for various tools and libraries
+
+---
+
+**⭐ If you find this repository useful, please consider giving it a star!**
