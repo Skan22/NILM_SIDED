@@ -78,7 +78,7 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
         avg_val_loss = val_loss / max(1, len(val_loader))
         epoch_time = time.time() - epoch_start_time
         
-        scheduler.step()
+        scheduler.step(avg_val_loss) if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) else scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
         print(f"Epoch {epoch+1}/{num_epochs} | Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | LR: {current_lr:.6f} | Time: {epoch_time:.2f}s")
@@ -127,7 +127,7 @@ def evaluate_single_appliance_model(model, test_loader, device, scaler_y, applia
         predictions = np.nan_to_num(predictions, nan=0.0, posinf=1e6, neginf=-1e6)
         
     metrics = calculate_single_appliance_metrics(targets, predictions, appliance_name, scaler_y)
-    metrics['parameters'] = count_parameters(model)
+    
     
     # Inverse transform for returning real values
     predictions_real = scaler_y.inverse_transform(predictions.astype(np.float64)).astype(np.float32)
