@@ -135,16 +135,26 @@ def preprocess_single_appliance(train_df, test_df, appliance_name):
 # TCN Model
 TCNModel(
     input_size=1,      # Aggregate power
-    output_size=1,     # Single appliance (NOT 5!)
+    output_size=1,     # Single appliance
     num_channels=[128]*8,
-    dropout=0.33
+    dropout=0.33,
+    causal=False       # Non-causal for offline analysis
 )
 
-# LSTM Model
+# BiLSTM Model
 LSTMModel(
     input_size=1,
-    output_size=1,     # Single appliance (NOT 5!)
+    output_size=1,
     hidden_size=128,
+    num_layers=3,
+    bidirectional=True # Bidirectional
+)
+
+# Transformer Model
+TransformerModel(
+    input_size=1,
+    d_model=128,
+    nhead=4,
     num_layers=3
 )
 ```

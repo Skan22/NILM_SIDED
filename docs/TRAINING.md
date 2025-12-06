@@ -30,6 +30,9 @@ CONFIG = {
     'tcn_layers': [128] * 8,  # 8 layers of 128 channels
     'lstm_hidden': 128,
     'lstm_layers': 3,
+    'transformer_dmodel': 128,
+    'transformer_nhead': 4,
+    'transformer_layers': 3,
     
     # System
     'num_workers': 0,         # Windows compatibility
@@ -65,18 +68,17 @@ CONFIG_FAIR = {
 TCNModel(
     input_size=1,
     num_channels=[128]*8,     # 8 layers
-    kernel_size=3,
     dropout=0.33,
-    output_size=1
+    output_size=1,
+    causal=False              # Non-Causal
 )
 ```
 
 **Architecture**:
-- 8 temporal convolutional blocks
-- Exponentially increasing dilation: 1, 2, 4, 8, 16, 32, 64, 128
-- Receptive field covers entire input sequence
-- Global average pooling
-- Final linear layer
+- 8 temporal convolutional blocks with **TemporalLayerNorm**
+- Exponentially increasing dilation
+- **Non-Causal**: Uses standard padding to see future context
+- Global pooling/Midpoint selection
 
 ### 2. ATCN (Attention-TCN)
 
@@ -84,33 +86,50 @@ TCNModel(
 ATCNModel(
     input_size=1,
     num_channels=[128]*8,
-    kernel_size=3,
     dropout=0.33,
-    output_size=1
+    output_size=1,
+    causal=False
 )
 ```
 
 **Architecture**:
-- Same as TCN
-- **Addition**: Attention mechanism after TCN layers
-- Attention weights highlight important temporal features
+- Base: Non-Causal TCN
+- **Attention**: Multi-Head Self-Attention (4 heads)
+- Captures complex dependencies and transients
 
-### 3. LSTM
+### 3. BiLSTM
 
 ```python
 LSTMModel(
     input_size=1,
     hidden_size=128,
     num_layers=3,
-    output_size=1
+    output_size=1,
+    bidirectional=True
 )
 ```
 
 **Architecture**:
-- 3 LSTM layers
-- 128 hidden units per layer
-- Dropout 0.2 between layers
-- Uses final hidden state
+- 3 Bidirectional LSTM layers
+- Input moves in both directions (past->future, future->past)
+- Concatenates hidden states (256 dims total)
+
+### 4. Transformer
+
+```python
+TransformerModel(
+    input_size=1,
+    d_model=128,
+    nhead=4,
+    num_layers=3
+)
+```
+
+**Architecture**:
+- Positional Encoding
+- 3 Transformer Encoder Layers
+- Self-Attention mechanism
+- State-of-the-art sequence modeling
 
 ---
 

@@ -47,7 +47,7 @@ Following the paper's methodology, we train **separate models for each appliance
 - ✅ **Paper-Compliant Implementation**: Exact replication of the paper's methodology
 - ✅ **Single-Appliance NILM**: Specialized models for each appliance
 - ✅ **AMDA Data Augmentation**: Appliance-Modulated Data Augmentation
-- ✅ **Multiple Architectures**: TCN, ATCN (Attention-TCN), and LSTM
+- ✅ **Multiple Architectures**: TCN (Non-Causal), ATCN (Multi-Head), BiLSTM, and Transformer
 - ✅ **Robust Data Handling**: Three-layer missing value handling system
 - ✅ **Comprehensive Metrics**: MAE, MSE, R², and NDE evaluation
 
@@ -175,25 +175,33 @@ where:
 ### Architectures
 
 #### 1. TCN (Temporal Convolutional Network)
+- **Type**: Non-Causal (Offline)
 - **Layers**: 8 temporal convolutional blocks
+- **Normalization**: TemporalLayerNorm (optimized for series)
 - **Channels**: 128 per layer
 - **Kernel Size**: 3
 - **Dropout**: 0.33
-- **Receptive Field**: Covers entire input sequence
-- **Parameters**: ~1.05M
+- **Receptive Field**: Covers entire input sequence (Past + Future)
 
 #### 2. ATCN (Attention-TCN)
-- **Base**: TCN architecture
-- **Addition**: Attention mechanism
-- **Purpose**: Highlights important temporal features
+- **Base**: Non-Causal TCN backbone
+- **Attention**: Multi-Head Self-Attention (MHSA)
+- **Heads**: 4
+- **Purpose**: Captures long-range dependencies and crucial transients
 - **Parameters**: ~1.4-1.6M
 
-#### 3. LSTM (Long Short-Term Memory)
+#### 3. BiLSTM (Bidirectional LSTM)
 - **Layers**: 3 LSTM layers
 - **Hidden Size**: 128
 - **Dropout**: 0.2
-- **Bidirectional**: No (standard LSTM)
-- **Parameters**: ~265k
+- **Bidirectional**: Yes (Past + Future context)
+- **Parameters**: ~500k
+
+#### 4. Transformer
+- **Layers**: 3 Encoder layers
+- **Heads**: 4
+- **d_model**: 128
+- **Purpose**: SOTA sequence modeling via self-attention
 
 > **⚠️ IMPORTANT**: The current model configurations are **NOT parameter-matched**, which makes direct comparison unfair:
 > - **ATCN** has 40-50% MORE parameters than TCN
@@ -217,16 +225,16 @@ CONFIG = {
 }
 ```
 
-### Sequence-to-End Prediction
+### Sequence-to-Point Prediction (Midpoint)
 
 Input: Time series window of aggregate power  
-Output: Single point prediction at the **end** of the window (causal prediction)
+Output: Single point prediction at the **center** of the window (offline disaggregation)
 
 ```
-X_t = {x_{t-287}, ..., x_t}  → y_t
+X_t = {x_{t-144}, ..., x_t, ..., x_{t+144}}  → y_t
 ```
 
-> **Note**: The models are causal (TCN uses Chomp1d, LSTM uses last state), ensuring no future leakage.
+> **Note**: The models are non-causal (BiLSTM, Non-causal TCN, Transformer), utilizing both past and future context for maximum accuracy.
 
 ---
 

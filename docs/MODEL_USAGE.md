@@ -6,7 +6,8 @@ This document details exactly how to use the trained NILM models, specifying the
 
 The models (TCN, ATCN, LSTM) are designed for **Sequence-to-Point (S2P)** disaggregation.
 *   **Input**: A window of aggregate power readings (e.g., 24 hours).
-*   **Output**: The estimated power consumption of a specific appliance at the **end** of that window (Sequence-to-End).
+*   **Input**: A window of aggregate power readings (e.g., 24 hours).
+*   **Output**: The estimated power consumption of a specific appliance at the **midpoint** of that window (Midpoint Prediction).
 
 ## 2. Input Specification
 
@@ -59,7 +60,7 @@ To convert the model's output back to interpretable power readings (Watts):
 ### Final Output
 *   **Value**: Estimated power consumption of the target appliance.
 *   **Unit**: Watts (W).
-*   **Timepoint**: Corresponds to the timestamp at $t$ (end of the window).
+*   **Timepoint**: Corresponds to the timestamp at $t$ (center of the window).
 
 ## 4. Example Usage (Python)
 
