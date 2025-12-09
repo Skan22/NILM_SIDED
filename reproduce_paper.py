@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
 from src.dataset import load_data_by_location, create_sequences, NILMDataset, preprocess_single_appliance
-from src.models import TCNModel, ATCNModel, LSTMModel, TransformerModel
+from src.models import TCNModel, ATCNModel, LSTMModel, TransformerModel,ImprovedATCNModel
 from src.train import train_single_appliance_model, evaluate_single_appliance_model, calculate_single_appliance_metrics
 from torch.utils.data import DataLoader
 import numpy as np
@@ -19,28 +19,28 @@ CONFIG = {
     'eval_stride': 1,         # Dense evaluation
     'batch_size': 256,
     'learning_rate': 0.001,
-    'num_epochs': 20,
+    'num_epochs': 10,
     'warmup_epochs': 3,
     'min_lr': 1e-6,
     'early_stopping_patience': 5,
     'num_workers': 0,         # Windows compatibility
     'pin_memory': True,
     'dropout': 0.33,
-    'tcn_layers': [128] * 8,  # 8 layers of 128 channels
+    'tcn_layers': [256] * 8,  # 8 layers of 128 channels
     'lstm_hidden': 128,       # LSTM hidden size
-    'lstm_layers': 3,          # LSTM layers
-    'transformer_dmodel': 128,
-    'transformer_nhead': 4,
-    'transformer_layers': 3
-}
+    'lstm_layers': 3
+    }
 
 # Appliances to disaggregate (single-appliance NILM)
-APPLIANCES = ['EVSE', 'PV', 'CS', 'CHP', 'BA']
-
+APPLIANCES = ['EVSE']
+# APPLIANCES = ['EVSE', 'PV', 'CS', 'CHP', 'BA']
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Only use pin_memory on CUDA for efficiency
+    CONFIG['pin_memory'] = (device.type == 'cuda')
     print(f"Using device: {device}")
+    print(f"Pin memory: {CONFIG['pin_memory']}")
     print(f"\n{'='*80}")
     print("SINGLE-APPLIANCE NILM TRAINING (As per Paper)")
     print(f"{'='*80}\n")
@@ -68,7 +68,6 @@ def main():
             output_size=CONFIG['output_size'],
             bidirectional=True
         ),
-
         'TCN': lambda: TCNModel(
             input_size=CONFIG['input_size'], 
             num_channels=CONFIG['tcn_layers'], 
@@ -76,21 +75,15 @@ def main():
             output_size=CONFIG['output_size'],
             causal=False
         ),
-        'ATCN': lambda: ATCNModel(
+        'ATCN': lambda: ImprovedATCNModel(
             input_size=CONFIG['input_size'], 
-            num_channels=CONFIG['tcn_layers'], 
-            dropout=CONFIG['dropout'],
+            num_channels=CONFIG['tcn_layers'],
+            dropout=0.25, 
             output_size=CONFIG['output_size'],
-            causal=False
+            causal=False,
+            num_heads=4
         ),
-        'Transformer': lambda: TransformerModel(
-            input_size=CONFIG['input_size'],
-            d_model=CONFIG['transformer_dmodel'],
-            nhead=CONFIG['transformer_nhead'],
-            num_layers=CONFIG['transformer_layers'],
-            output_size=CONFIG['output_size'],
-            dropout=CONFIG['dropout']
-        )
+
     }
     
     # Store all results
@@ -174,7 +167,20 @@ def main():
             # Create fresh model
             model = model_factory()
             criterion = nn.MSELoss()
-            optimizer = optim.Adam(model.parameters(), lr=CONFIG['learning_rate'])
+            
+            # Model-specific learning rates (TCN/ATCN need higher LR for better convergence)
+            model_lr_multipliers = {
+                'LSTM': 1.0,          # Standard LR for LSTM
+                'TCN': 2.0,           # Moderate LR for TCN
+                'ATCN': 2.5,          # Optimal LR for ATCN with attention
+            }
+            
+            lr_multiplier = model_lr_multipliers.get(model_name, 1.0)
+            effective_lr = CONFIG['learning_rate'] * lr_multiplier
+            
+            print(f"Using learning rate: {effective_lr} (base_lr * {lr_multiplier})")
+            
+            optimizer = optim.Adam(model.parameters(), lr=effective_lr)
             
             # Setup learning rate scheduler (ReduceLROnPlateau)
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(

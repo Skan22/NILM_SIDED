@@ -19,7 +19,8 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
     """
     model.to(device)
     use_amp = (device.type == 'cuda')
-    scaler = GradScaler(enabled=use_amp,device="cuda")
+    scaler = GradScaler(enabled=use_amp, device=device.type if use_amp else 'cpu')
+    non_blocking = use_amp  # Only use non_blocking transfers on CUDA
     
     best_val_loss = float('inf')
     patience_counter = 0
@@ -32,23 +33,18 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=False)
         
         for batch_X, batch_y in progress_bar:
-            batch_X = batch_X.to(device, non_blocking=True)
-            batch_y = batch_y.to(device, non_blocking=True)
+            batch_X = batch_X.to(device, non_blocking=non_blocking)
+            batch_y = batch_y.to(device, non_blocking=non_blocking)
             
-            
-            
-            with autocast(enabled=use_amp,device_type="cuda"):
+            with autocast(enabled=use_amp, device_type=device.type):
                 outputs = model(batch_X)
                 # Detect exploding outputs early
                 if not torch.isfinite(outputs).all():
                     print("⚠️ Detected non-finite model outputs. Clamping and continuing.")
                     outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e6, neginf=-1e6)
                 loss = criterion(outputs, batch_y)
-            optimizer.zero_grad(set_to_none=True)
-            if (not math.isfinite(loss.item())) or math.isnan(loss.item()):
-                print(f"❌ Invalid loss (NaN/Inf) at epoch {epoch+1}. Stopping training for {model_name}.")
-                break
             
+            optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -60,25 +56,41 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
         
         avg_train_loss = train_loss / max(1, len(train_loader))
         
+        # Check for NaN/Inf in training loss at epoch level (less overhead than per-batch)
+        if not math.isfinite(avg_train_loss):
+            print(f"❌ Invalid training loss (NaN/Inf) at epoch {epoch+1}. Stopping training for {model_name}.")
+            break
+        
         model.eval()
         val_loss = 0.0
         
-        with torch.inference_mode():
-            for batch_X, batch_y in val_loader:
-                batch_X = batch_X.to(device, non_blocking=True)
-                batch_y = batch_y.to(device, non_blocking=True)
-                
-                with autocast(enabled=use_amp,device_type="cuda"):
-                    outputs = model(batch_X)
-                    if not torch.isfinite(outputs).all():
-                        outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e6, neginf=-1e6)
-                    loss = criterion(outputs, batch_y)
-                val_loss += loss.item()
-        
-        avg_val_loss = val_loss / max(1, len(val_loader))
+        if len(val_loader) == 0:
+            print(f"⚠️ Warning: Empty validation loader at epoch {epoch+1}. Skipping validation.")
+            avg_val_loss = avg_train_loss
+        else:
+            with torch.inference_mode():
+                for batch_X, batch_y in val_loader:
+                    batch_X = batch_X.to(device, non_blocking=non_blocking)
+                    batch_y = batch_y.to(device, non_blocking=non_blocking)
+                    
+                    with autocast(enabled=use_amp, device_type=device.type):
+                        outputs = model(batch_X)
+                        loss = criterion(outputs, batch_y)
+                    val_loss += loss.item()
+            
+            avg_val_loss = val_loss / len(val_loader)
         epoch_time = time.time() - epoch_start_time
         
-        scheduler.step(avg_val_loss) if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau) else scheduler.step()
+        # Robust scheduler step handling
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(avg_val_loss)
+        else:
+            try:
+                scheduler.step()
+            except TypeError:
+                # Some schedulers may require a metric
+                scheduler.step(avg_val_loss)
+        
         current_lr = optimizer.param_groups[0]['lr']
         
         print(f"Epoch {epoch+1}/{num_epochs} | Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | LR: {current_lr:.6f} | Time: {epoch_time:.2f}s")
@@ -86,7 +98,8 @@ def train_single_appliance_model(model, train_loader, val_loader, criterion, opt
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            best_model_state = model.state_dict().copy()
+            # Properly clone state dict to CPU to avoid memory leaks
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         else:
             patience_counter += 1
             if patience_counter >= early_stopping_patience:
@@ -107,11 +120,12 @@ def evaluate_single_appliance_model(model, test_loader, device, scaler_y, applia
     model.eval()
     all_predictions = []
     all_targets = []
+    non_blocking = (device.type == 'cuda')
     
     with torch.inference_mode():
         for batch_X, batch_y in tqdm(test_loader, desc=f'Evaluating {appliance_name}', leave=False):
-            batch_X = batch_X.to(device, non_blocking=True)
-            batch_y = batch_y.to(device, non_blocking=True)
+            batch_X = batch_X.to(device, non_blocking=non_blocking)
+            batch_y = batch_y.to(device, non_blocking=non_blocking)
             
             outputs = model(batch_X)
             
@@ -139,12 +153,9 @@ def evaluate_single_appliance_model(model, test_loader, device, scaler_y, applia
 def calculate_single_appliance_metrics(targets, predictions, appliance_name, scaler_y):
     """Calculate metrics for a single appliance with robust sanitization."""
     
-    # Sanitize inputs
+    # Sanitize inputs (replace NaN/Inf but don't clip arbitrarily)
     predictions = np.nan_to_num(predictions, nan=0.0, posinf=0.0, neginf=0.0)
-    predictions = np.clip(predictions, -10.0, 10.0) # Clip scaled values to reasonable range
-    
     targets = np.nan_to_num(targets, nan=0.0, posinf=0.0, neginf=0.0)
-    targets = np.clip(targets, -10.0, 10.0)
     
     # Inverse transform to original scale
     targets_real = scaler_y.inverse_transform(targets.astype(np.float64)).astype(np.float32)

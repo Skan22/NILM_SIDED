@@ -95,6 +95,19 @@ class TCNModel(nn.Module):
         self.fc = nn.Linear(num_channels[-1], output_size)
         self.causal = causal
         
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        """Robust initialization for TCN"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+                
     def forward(self, x):
         # x: (batch, seq_len, input_size)
         x = x.permute(0, 2, 1) # -> (batch, features, seq_len)
@@ -215,3 +228,74 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+
+class ImprovedATCNModel(nn.Module):
+    """
+    Attention-enhanced TCN with improved temporal aggregation
+    Changes from original:
+    1. Midpoint selection instead of mean pooling
+    2. Layer normalization after attention
+    3. Residual connection to preserve TCN features
+    """
+    def __init__(self, input_size, num_channels=[128]*6, kernel_size=3, 
+                 dropout=0.33, output_size=1, causal=False, num_heads=2):
+        super().__init__()
+        self.tcn = TCNBackbone(input_size, num_channels, kernel_size, dropout, causal=causal)
+        
+        # Multi-Head Attention
+        self.embed_dim = num_channels[-1]
+        self.num_heads = num_heads
+        self.mha = nn.MultiheadAttention(
+            embed_dim=self.embed_dim, 
+            num_heads=self.num_heads, 
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Layer normalization for stability
+        self.norm = nn.LayerNorm(self.embed_dim)
+        
+        self.fc = nn.Linear(self.embed_dim, output_size)
+        
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Robust initialization"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        # x: (batch, seq_len, input_size)
+        batch_size, seq_len, _ = x.shape
+        mid_idx = seq_len // 2
+        
+        # TCN features
+        x = x.permute(0, 2, 1)      # -> (batch, features, seq_len)
+        features = self.tcn(x)      # -> (batch, channels, seq_len)
+        features = features.permute(0, 2, 1)  # -> (batch, seq_len, channels)
+        
+        # Multi-Head Self-Attention
+        attn_output, attn_weights = self.mha(features, features, features)
+        
+        # Layer normalization
+        attn_output = self.norm(attn_output)
+        
+        # IMPROVEMENT 1: Use midpoint instead of mean pooling
+        # This aligns with the midpoint target position
+        context = attn_output[:, mid_idx, :]
+        
+        # IMPROVEMENT 2: Optional residual connection
+        # Preserves TCN features + adds attention refinement
+        tcn_mid = features[:, mid_idx, :]
+        context = context + tcn_mid  # Residual connection
+        
+        return self.fc(context)
