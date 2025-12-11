@@ -60,6 +60,13 @@ class TemporalBlock(nn.Module):
         return self.relu(out + res)
 
 class TCNBackbone(nn.Module):
+    """Temporal Convolutional Network Backbone
+    
+    Args:
+        causal: If True, uses causal convolutions (only past context).
+                If False, uses non-causal convolutions with symmetric padding,
+                providing bidirectional context (past + future) like BiLSTM.
+    """
     def __init__(self, input_size, num_channels, kernel_size=3, dropout=0.2, causal=True):
         super(TCNBackbone, self).__init__()
         layers = []
@@ -71,11 +78,12 @@ class TCNBackbone(nn.Module):
             out_channels = num_channels[i]
             
             if causal:
-                # Causal padding: we pad (k-1)*d to the left, then chomp it off
+                # Causal padding: pad (k-1)*d to the left, then chomp it off
+                # Only uses past context (unidirectional)
                 padding = (kernel_size - 1) * dilation_size
             else:
-                # Non-causal padding: (k-1)*d / 2 on both sides (assuming odd kernel)
-                # This keeps sequence length same without chomp
+                # Non-causal (bidirectional) padding: (k-1)*d / 2 on both sides
+                # This provides symmetric context from past AND future, like BiLSTM
                 padding = ((kernel_size - 1) * dilation_size) // 2
                 
             layers.append(TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
@@ -114,10 +122,12 @@ class TCNModel(nn.Module):
         y = self.tcn(x)        # -> (batch, channels, seq_len)
         
         if self.causal:
-            # Predict using last step
+            # Causal: Use last timestep (only past context available)
             out = y[:, :, -1]
         else:
-            # Predict using middle step (for midpoint target)
+            # Non-causal (bidirectional): Use middle timestep
+            # At this point, each position has seen both past AND future context
+            # through the symmetric (non-causal) convolutions, similar to BiLSTM
             mid = y.size(2) // 2
             out = y[:, :, mid]
             
@@ -187,47 +197,6 @@ class LSTMModel(nn.Module):
             out = lstm_out[:, -1, :]
             
         return self.fc(out)
-
-class TransformerModel(nn.Module):
-    def __init__(self, input_size, d_model=128, nhead=4, num_layers=3, output_size=5, dropout=0.1, max_len=500):
-        super(TransformerModel, self).__init__()
-        
-        self.embedding = nn.Linear(input_size, d_model)
-        self.pos_encoder = PositionalEncoding(d_model, dropout, max_len)
-        
-        encoder_layers = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=d_model*4, dropout=dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers)
-        
-        self.fc = nn.Linear(d_model, output_size)
-        self.d_model = d_model
-
-    def forward(self, x):
-        # x: (batch, seq_len, input_size)
-        x = self.embedding(x) * math.sqrt(self.d_model)
-        x = self.pos_encoder(x)
-        x = self.transformer_encoder(x)
-        
-        # Predict using middle token
-        mid = x.size(1) // 2
-        out = x[:, mid, :]
-        return self.fc(out)
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1), :]
-        return self.dropout(x)
 
 class ImprovedATCNModel(nn.Module):
     """

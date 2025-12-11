@@ -200,3 +200,187 @@ def calculate_single_appliance_metrics(targets, predictions, appliance_name, sca
     print(f"  NDE: {nde:.4f}")
     
     return metrics
+
+
+def train_multi_appliance_model(model, train_loader, val_loader, criterion, optimizer, 
+                                scheduler, num_epochs, device, early_stopping_patience, 
+                                model_name, appliance_names):
+    """
+    Training loop for multi-appliance (multi-output) models.
+    """
+    model.to(device)
+    use_amp = (device.type == 'cuda')
+    scaler = GradScaler(enabled=use_amp, device=device.type if use_amp else 'cpu')
+    non_blocking = use_amp
+    
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
+    
+    for epoch in tqdm(range(num_epochs), desc=f'Training {model_name} (Multi-Output)'):
+        epoch_start_time = time.time()
+        model.train()
+        train_loss = 0.0
+        
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=False)
+        
+        for batch_X, batch_y in progress_bar:
+            batch_X = batch_X.to(device, non_blocking=non_blocking)
+            # batch_y shape: (Batch, 5)
+            batch_y = batch_y.to(device, non_blocking=non_blocking)
+            
+            with autocast(enabled=use_amp, device_type=device.type):
+                outputs = model(batch_X) # (Batch, 5)
+                
+                if not torch.isfinite(outputs).all():
+                    print("⚠️ Detected non-finite model outputs. Clamping.")
+                    outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1e6, neginf=-1e6)
+                
+                loss = criterion(outputs, batch_y)
+            
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            
+            train_loss += loss.item()
+            progress_bar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        avg_train_loss = train_loss / max(1, len(train_loader))
+        
+        if not math.isfinite(avg_train_loss):
+            print(f"❌ Invalid training loss at epoch {epoch+1}. Stopping.")
+            break
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        
+        if len(val_loader) > 0:
+            with torch.inference_mode():
+                for batch_X, batch_y in val_loader:
+                    batch_X = batch_X.to(device, non_blocking=non_blocking)
+                    batch_y = batch_y.to(device, non_blocking=non_blocking)
+                    
+                    with autocast(enabled=use_amp, device_type=device.type):
+                        outputs = model(batch_X)
+                        loss = criterion(outputs, batch_y)
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / len(val_loader)
+        else:
+            avg_val_loss = avg_train_loss
+            
+        epoch_time = time.time() - epoch_start_time
+        
+        # Scheduler
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(avg_val_loss)
+        else:
+            try: scheduler.step()
+            except TypeError: scheduler.step(avg_val_loss)
+            
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch+1}/{num_epochs} | Train: {avg_train_loss:.6f} | Val: {avg_val_loss:.6f} | LR: {current_lr:.6f}")
+        
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience_counter += 1
+            if patience_counter >= early_stopping_patience:
+                print(f"⚠️ Early stopping at epoch {epoch+1}. Best val: {best_val_loss:.6f}")
+                break
+                
+    if best_model_state:
+        model.load_state_dict(best_model_state)
+        print(f"✅ Restored best model (Val Loss: {best_val_loss:.6f})")
+        
+    return model
+
+def evaluate_multi_appliance_model(model, test_loader, device, scaler_y, appliance_names):
+    """
+    Evaluate multi-output model on test set.
+    """
+    model.eval()
+    all_predictions = []
+    all_targets = []
+    non_blocking = (device.type == 'cuda')
+    
+    with torch.inference_mode():
+        for batch_X, batch_y in tqdm(test_loader, desc='Evaluating Multi-Output', leave=False):
+            batch_X = batch_X.to(device, non_blocking=non_blocking)
+            batch_y = batch_y.to(device, non_blocking=non_blocking)
+            
+            outputs = model(batch_X)
+            
+            all_predictions.append(outputs.cpu().numpy())
+            all_targets.append(batch_y.cpu().numpy())
+            
+    # Stack -> (N, 5)
+    predictions = np.vstack(all_predictions)
+    targets = np.vstack(all_targets)
+    
+    # Sanitize
+    predictions = np.nan_to_num(predictions, nan=0.0, posinf=1e6, neginf=-1e6)
+    
+    # Inverse transform
+    # scaler_y expects (N, 5)
+    predictions_real = scaler_y.inverse_transform(predictions).astype(np.float32)
+    targets_real = scaler_y.inverse_transform(targets).astype(np.float32)
+    
+    metrics = calculate_multi_appliance_metrics(targets_real, predictions_real, appliance_names)
+    
+    return metrics, predictions_real, targets_real
+
+def calculate_multi_appliance_metrics(targets_real, predictions_real, appliance_names):
+    """Calculate metrics for each appliance and average."""
+    metrics = {}
+    
+    # Physical constraints
+    load_appliances = ['EVSE', 'CS', 'BA']
+    generation_appliances = ['PV', 'CHP']
+    
+    # Iterate over columns
+    for i, app_name in enumerate(appliance_names):
+        y_true = targets_real[:, i]
+        y_pred = predictions_real[:, i]
+        
+        # Apply constraints
+        if app_name in load_appliances:
+            y_pred = np.maximum(y_pred, 0)
+        elif app_name in generation_appliances:
+            y_pred = np.minimum(y_pred, 0)
+            
+        mae_w = mean_absolute_error(y_true, y_pred)
+        mse_w = mean_squared_error(y_true, y_pred)
+        r2 = r2_score(y_true, y_pred)
+        
+        numerator = np.sum(np.abs(y_true - y_pred))
+        denominator = np.sum(np.abs(y_true))
+        nde = numerator / denominator if denominator > 0 else float('inf')
+        
+        metrics[app_name] = {
+            'MAE_W': float(mae_w),
+            'MSE_W': float(mse_w),
+            'R2': float(r2),
+            'NDE': float(nde)
+        }
+    
+    # Calculate Average Metrics
+    avg_mae = np.mean([m['MAE_W'] for m in metrics.values()])
+    avg_nde = np.mean([m['NDE'] for m in metrics.values()])
+    
+    print(f"\n{'='*40}")
+    print("Multi-Appliance Results:")
+    print(f"{'='*40}")
+    for app in appliance_names:
+        m = metrics[app]
+        print(f"{app:<5} | MAE: {m['MAE_W']:.2f} | R2: {m['R2']:.4f} | NDE: {m['NDE']:.4f}")
+    print(f"{'-'*40}")
+    print(f"AVG   | MAE: {avg_mae:.2f} | NDE: {avg_nde:.4f}")
+    print(f"{'='*40}\n")
+    
+    return metrics

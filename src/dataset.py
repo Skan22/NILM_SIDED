@@ -99,6 +99,63 @@ def preprocess_single_appliance(train_df, test_df, appliance_name):
     
     return X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled, scaler_X, scaler_y
 
+def preprocess_multi_appliance(train_df, test_df, appliance_names):
+    """
+    Preprocess data for multi-appliance NILM (Single-Input Multi-Output).
+    
+    Args:
+        train_df: Training dataframe
+        test_df: Testing dataframe
+        appliance_names: List of target appliance names
+    
+    Returns:
+        Scaled data and scalers for input (aggregate) and output (all appliances)
+    """
+    # Extract aggregate power (input)
+    X_train_raw = train_df['Aggregate'].values.reshape(-1, 1)
+    X_test_raw = test_df['Aggregate'].values.reshape(-1, 1)
+    
+    # Extract multiple appliances power (output) -> (N, 5)
+    y_train_raw = train_df[appliance_names].values
+    y_test_raw = test_df[appliance_names].values
+    
+    # Check for and handle missing/inf values
+    for name, arr in [("X_train", X_train_raw), ("y_train", y_train_raw), 
+                       ("X_test", X_test_raw), ("y_test", y_test_raw)]:
+        nan_count = np.isnan(arr).sum()
+        inf_count = np.isinf(arr).sum()
+        
+        if nan_count > 0 or inf_count > 0:
+            print(f"  ⚠️ Multi-Appliance - {name}: {nan_count} NaN, {inf_count} Inf values")
+            arr = np.where(np.isinf(arr), np.nan, arr)
+            arr = np.nan_to_num(arr, nan=0.0)
+            
+            if name == "X_train": X_train_raw = arr
+            elif name == "y_train": y_train_raw = arr
+            elif name == "X_test": X_test_raw = arr
+            elif name == "y_test": y_test_raw = arr
+    
+    # Scalers
+    from sklearn.preprocessing import StandardScaler
+    scaler_X = RobustScaler()
+    scaler_y = StandardScaler() # Fits on (N, 5)
+    
+    print(f"  Raw Data Stats for {len(appliance_names)} appliances:")
+    print(f"    X_train_raw: mean={X_train_raw.mean():.2f}, std={X_train_raw.std():.2f}")
+    print(f"    y_train_raw: shape={y_train_raw.shape}, mean={y_train_raw.mean():.2f}")
+    
+    X_train_scaled = scaler_X.fit_transform(X_train_raw)
+    y_train_scaled = scaler_y.fit_transform(y_train_raw)
+    
+    X_test_scaled = scaler_X.transform(X_test_raw)
+    y_test_scaled = scaler_y.transform(y_test_raw)
+    
+    print(f"  Scaled Data Stats:")
+    print(f"    X_train: mean={X_train_scaled.mean():.2f}, std={X_train_scaled.std():.2f}")
+    print(f"    y_train: mean={y_train_scaled.mean():.2f}, std={y_train_scaled.std():.2f}")
+    
+    return X_train_scaled, y_train_scaled, X_test_scaled, y_test_scaled, scaler_X, scaler_y
+
 def load_data_by_location(base_path='./AMDA_SIDED', target_locations=['Tokyo'], source_locations=['LA', 'Offenbach'], resample_rule='5min'):
     """
     Load data split by location for Domain Adaptation tasks with robust missing value handling.
