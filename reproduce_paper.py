@@ -11,7 +11,7 @@ import json
 
 # Configuration matching the paper
 CONFIG = {
-    'data_path': './AMDA_SIDED',
+    'data_path': './SIDED', # change this 
     'input_size': 1,
     'output_size': 5,        # Multi-output: 5 appliances
     'seq_length': 288,        # 24h window at 5-min intervals
